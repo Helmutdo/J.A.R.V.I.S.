@@ -124,18 +124,40 @@ Cuando recibas una entrada de un usuario:
     def listen_for_entry(self):
         """Listens for a diary entry from the user and transcribes it."""
         self.speak("Estoy escuchando. Habla ahora.")
-        print("Listening...")
+        print("Listening... (habla y haz una pausa para terminar)")
+
+        last_partial = ""
+        stable_count = 0
+        # 10 lecturas × 0.25s = ~2.5s sin cambio → forzar resultado final
+        STABLE_FRAMES = 10
 
         with sd.RawInputStream(
             samplerate=16000, blocksize=8000, dtype="int16", channels=1
         ) as stream:
             while True:
-                data = stream.read(4000)[0]
+                data, _ = stream.read(4000)
                 if self.recognizer.AcceptWaveform(bytes(data)):
                     result = json.loads(self.recognizer.Result())
                     if result.get("text"):
-                        print(f"Recognized: {result['text']}")
+                        print(f"\rReconocido: {result['text']}")
                         return result["text"]
+                else:
+                    partial = json.loads(self.recognizer.PartialResult()).get("partial", "")
+                    if partial:
+                        print(f"\r>>> {partial}...", end="", flush=True)
+                    if partial and partial == last_partial:
+                        stable_count += 1
+                        if stable_count >= STABLE_FRAMES:
+                            final = json.loads(self.recognizer.FinalResult()).get("text", "").strip()
+                            print()
+                            if final:
+                                print(f"Reconocido: {final}")
+                                return final
+                            stable_count = 0
+                            last_partial = ""
+                    else:
+                        last_partial = partial
+                        stable_count = 0
 
     def start_diary_session(self):
         """Starts a voice-based diary session."""

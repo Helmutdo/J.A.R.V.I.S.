@@ -1,4 +1,4 @@
-# J.A.R.V.I.S. (JARVYS)
+# J.A.R.V.I.S. 
 
 Asistente de diario por voz en español: reconoce lo que dices con **Vosk**, guarda entradas en un archivo de texto y responde con **Gemini** (Google AI).
 
