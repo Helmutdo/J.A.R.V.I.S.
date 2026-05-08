@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -12,8 +13,19 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-# Ruta del modelo relativa a este archivo (funciona desde cualquier cwd)
 _MODEL_DIR = Path(__file__).resolve().parent / "model" / "vosk-model-small-es-0.42"
+
+_SYSTEM_PROMPT = """Eres JARVYS, un asistente de inteligencia artificial sofisticado y útil para Tony Stark. Tu función principal es actuar como un diario personal avanzado.
+
+Cuando recibas una entrada de un usuario:
+
+1. Analiza la entrada del diario: Comprende el contenido, el tema principal, las emociones implícitas (si las hay) y cualquier detalle relevante.
+2. Genera una respuesta concisa y empática:
+   - Reconoce la entrada del usuario.
+   - Ofrece un comentario breve y relevante sobre lo que el usuario ha compartido.
+   - Puedes hacer una pregunta reflexiva o proponer una idea para que el usuario pueda expandir su pensamiento en futuras entradas, fomentando la continuidad del diario.
+   - Mantén un tono de apoyo, profesional y ligeramente formal, como JARVYS.
+   - La respuesta debe ser directa, no divagar."""
 
 
 class JARVYS:
@@ -21,9 +33,9 @@ class JARVYS:
         self.engine = pyttsx3.init()
         self._set_spanish_voice()
         self.DIARY_FILE = "jarvys_diary.txt"
-        self.API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        self.OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
         self.history = []
+
+        self._select_backend()
 
         try:
             self.model = vosk.Model(str(_MODEL_DIR))
@@ -40,27 +52,86 @@ class JARVYS:
             self.engine.setProperty("voice", spanish.id)
             print(f"Voz: {spanish.name}")
 
+    def _select_backend(self):
+        print("\n╔══════════════════════════════╗")
+        print("║   JARVYS — Selección de LLM  ║")
+        print("╚══════════════════════════════╝")
+        print("  1) OpenRouter  (nube)")
+        print("  2) Ollama      (local)")
+
+        while True:
+            choice = input("\nElige backend [1/2]: ").strip()
+            if choice in ("1", "2"):
+                break
+            print("  → Escribe 1 o 2")
+
+        if choice == "1":
+            api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            if not api_key:
+                print("  → OPENROUTER_API_KEY no encontrada en .env")
+                sys.exit(1)
+            self.llm_url = "https://openrouter.ai/api/v1/chat/completions"
+            self.llm_model = "google/gemini-flash-1.5"
+            self.llm_headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+            print(f"  → OpenRouter / {self.llm_model}\n")
+        else:
+            self._select_ollama_model()
+
+    def _select_ollama_model(self):
+        try:
+            result = subprocess.run(
+                ["ollama", "list"], capture_output=True, text=True, timeout=10
+            )
+        except FileNotFoundError:
+            print("  → Ollama no encontrado. Instala desde https://ollama.com")
+            sys.exit(1)
+        except subprocess.TimeoutExpired:
+            print("  → Ollama no responde.")
+            sys.exit(1)
+
+        lines = result.stdout.strip().splitlines()
+        models = [line.split()[0] for line in lines[1:] if line.strip()]
+
+        if not models:
+            print("  → Sin modelos en Ollama. Descarga uno: ollama pull llama3.2")
+            sys.exit(1)
+
+        print("\nModelos disponibles:")
+        for i, m in enumerate(models, 1):
+            print(f"  {i}) {m}")
+
+        while True:
+            raw = input(f"\nElige modelo [1-{len(models)}]: ").strip()
+            if raw.isdigit() and 1 <= int(raw) <= len(models):
+                break
+            print(f"  → Escribe un número entre 1 y {len(models)}")
+
+        self.llm_url = "http://localhost:11434/v1/chat/completions"
+        self.llm_model = models[int(raw) - 1]
+        self.llm_headers = {"Content-Type": "application/json"}
+        print(f"  → Ollama / {self.llm_model}\n")
+
     def speak(self, text):
-        """Converts text to speech."""
         print(f"JARVYS: {text}")
         self.engine.say(text)
         self.engine.runAndWait()
 
     def save_diary_entry(self, entry):
-        """Saves a diary entry with a timestamp."""
         with open(self.DIARY_FILE, "a", encoding="utf-8") as f:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"{timestamp}: {entry}\n")
-        print(f"Diary entry saved: {entry}")
+        print(f"Entrada guardada: {entry}")
 
     @staticmethod
-    def _extract_openrouter_text(body):
-        """Extrae el texto de la respuesta JSON de Open Router; None si no hay texto usable."""
+    def _extract_text(body):
         if not isinstance(body, dict):
             return None
         err = body.get("error")
         if isinstance(err, dict) and err.get("message"):
-            print(f"Open Router API error: {err.get('message')}")
+            print(f"API error: {err.get('message')}")
             return None
         choices = body.get("choices")
         if not choices or not isinstance(choices, list):
@@ -70,71 +141,39 @@ class JARVYS:
         if not isinstance(message, dict):
             return None
         text = message.get("content")
-        if text is None:
-            return None
-        return text.strip()
+        return text.strip() if text else None
 
-    def get_openrouter_response(self, user_entry):
-        """Gets a response from the Open Router API based on the user's entry."""
-        if not self.API_KEY:
-            print(
-                "OPENROUTER_API_KEY no está definida. "
-                "Exporta la clave o define la variable de entorno antes de ejecutar."
-            )
-            return (
-                "No puedo conectar con el modelo: falta la clave de API. "
-                "Configura OPENROUTER_API_KEY y vuelve a intentarlo."
-            )
-
-        system_prompt = """Eres JARVYS, un asistente de inteligencia artificial sofisticado y útil para Tony Stark. Tu función principal es actuar como un diario personal avanzado.
-
-Cuando recibas una entrada de un usuario:
-
-1. Analiza la entrada del diario: Comprende el contenido, el tema principal, las emociones implícitas (si las hay) y cualquier detalle relevante.
-2. Genera una respuesta concisa y empática:
-   - Reconoce la entrada del usuario.
-   - Ofrece un comentario breve y relevante sobre lo que el usuario ha compartido.
-   - Puedes hacer una pregunta reflexiva o proponer una idea para que el usuario pueda expandir su pensamiento en futuras entradas, fomentando la continuidad del diario.
-   - Mantén un tono de apoyo, profesional y ligeramente formal, como JARVYS.
-   - La respuesta debe ser directa, no divagar."""
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.API_KEY}",
-        }
-
+    def get_llm_response(self, user_entry):
         self.history.append({"role": "user", "content": user_entry})
 
         data = {
-            "model": "google/gemini-flash-1.5",
-            "messages": [{"role": "system", "content": system_prompt}] + self.history,
+            "model": self.llm_model,
+            "messages": [{"role": "system", "content": _SYSTEM_PROMPT}] + self.history,
         }
 
         try:
             response = requests.post(
-                self.OPENROUTER_URL, headers=headers, json=data, timeout=60
+                self.llm_url, headers=self.llm_headers, json=data, timeout=60
             )
             response.raise_for_status()
-            text = self._extract_openrouter_text(response.json())
+            text = self._extract_text(response.json())
             if text:
                 self.history.append({"role": "assistant", "content": text})
                 return text
             self.history.pop()
             return "Lo siento, no he podido obtener una respuesta válida del modelo."
         except requests.exceptions.RequestException as e:
-            print(f"Error contacting Open Router API: {e}")
+            print(f"Error contacting LLM: {e}")
             self.history.pop()
             return "Lo siento, no he podido procesar tu entrada en este momento."
 
     def listen_for_entry(self):
-        """Listens for a diary entry from the user and transcribes it."""
         self.speak("Estoy escuchando. Habla ahora.")
         print("Listening... (habla y haz una pausa para terminar)")
 
         last_partial = ""
         stable_count = 0
-        # 10 lecturas × 0.25s = ~2.5s sin cambio → forzar resultado final
-        STABLE_FRAMES = 10
+        STABLE_FRAMES = 10  # 10 × 0.25s = ~2.5s sin cambio → forzar resultado
 
         with sd.RawInputStream(
             samplerate=16000, blocksize=8000, dtype="int16", channels=1
@@ -165,7 +204,6 @@ Cuando recibas una entrada de un usuario:
                         stable_count = 0
 
     def start_diary_session(self):
-        """Starts a voice-based diary session."""
         self.speak("Hola, soy JARVYS. ¿Qué te gustaría registrar en tu diario hoy?")
 
         while True:
@@ -180,7 +218,7 @@ Cuando recibas una entrada de un usuario:
 
                 if user_entry:
                     self.save_diary_entry(user_entry)
-                    response = self.get_openrouter_response(user_entry)
+                    response = self.get_llm_response(user_entry)
                     self.speak(response)
 
             except (KeyboardInterrupt, EOFError):
