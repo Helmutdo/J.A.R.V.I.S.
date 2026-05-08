@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,24 +16,28 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 _MODEL_DIR = Path(__file__).resolve().parent / "model" / "vosk-model-small-es-0.42"
 
-_SYSTEM_PROMPT = """Eres JARVYS, un asistente de inteligencia artificial sofisticado y útil para Tony Stark. Tu función principal es actuar como un diario personal avanzado.
+# ANSI colors
+_C_JARVIS = "\033[96m"   # cyan brillante — JARVIS
+_C_USER   = "\033[93m"   # amarillo       — usuario
+_C_DIM    = "\033[90m"   # gris           — sistema/partial
+_C_RESET  = "\033[0m"
 
-Cuando recibas una entrada de un usuario:
+_SYSTEM_PROMPT = """Eres JARVIS, una inteligencia artificial avanzada. Tu función es actuar como diario personal de voz.
 
-1. Analiza la entrada del diario: Comprende el contenido, el tema principal, las emociones implícitas (si las hay) y cualquier detalle relevante.
-2. Genera una respuesta concisa y empática:
-   - Reconoce la entrada del usuario.
-   - Ofrece un comentario breve y relevante sobre lo que el usuario ha compartido.
-   - Puedes hacer una pregunta reflexiva o proponer una idea para que el usuario pueda expandir su pensamiento en futuras entradas, fomentando la continuidad del diario.
-   - Mantén un tono de apoyo, profesional y ligeramente formal, como JARVYS.
-   - La respuesta debe ser directa, no divagar."""
+Estilo de respuesta:
+- Tono: preciso, seco, profesional. Como el JARVIS de Iron Man: inteligente, eficiente, con ligero sarcasmo ocasional. Nunca condescendiente ni excesivamente empático.
+- Extensión: máximo 2-3 oraciones. Sin divagar.
+- No uses el nombre del usuario a menos que él lo haya mencionado explícitamente.
+- No preguntes "¿cómo te sientes?" ni uses frases terapéuticas.
+- Sí puedes hacer una pregunta breve y relevante para profundizar en la entrada, si tiene sentido.
+- Responde siempre en el mismo idioma que el usuario."""
 
 
-class JARVYS:
+class JARVIS:
     def __init__(self):
         self.engine = pyttsx3.init()
         self._set_spanish_voice()
-        self.DIARY_FILE = "jarvys_diary.txt"
+        self.DIARY_FILE = "jarvis_diary.txt"
         self.history = []
 
         self._select_backend()
@@ -50,12 +55,12 @@ class JARVYS:
         spanish = next((v for v in voices if "es" in v.id and "419" not in v.id), None)
         if spanish:
             self.engine.setProperty("voice", spanish.id)
-            print(f"Voz: {spanish.name}")
+            print(f"{_C_DIM}Voz: {spanish.name}{_C_RESET}")
 
     def _select_backend(self):
-        print("\n╔══════════════════════════════╗")
-        print("║   JARVYS — Selección de LLM  ║")
-        print("╚══════════════════════════════╝")
+        print(f"\n{_C_JARVIS}╔══════════════════════════════╗")
+        print("║   JARVIS — Selección de LLM  ║")
+        print(f"╚══════════════════════════════╝{_C_RESET}")
         print("  1) OpenRouter  (nube)")
         print("  2) Ollama      (local)")
 
@@ -115,7 +120,7 @@ class JARVYS:
         print(f"  → Ollama / {self.llm_model}\n")
 
     def speak(self, text):
-        print(f"JARVYS: {text}")
+        print(f"\n{_C_JARVIS}JARVIS:{_C_RESET} {text}\n")
         self.engine.say(text)
         self.engine.runAndWait()
 
@@ -123,7 +128,6 @@ class JARVYS:
         with open(self.DIARY_FILE, "a", encoding="utf-8") as f:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"{timestamp}: {entry}\n")
-        print(f"Entrada guardada: {entry}")
 
     @staticmethod
     def _extract_text(body):
@@ -161,41 +165,45 @@ class JARVYS:
                 self.history.append({"role": "assistant", "content": text})
                 return text
             self.history.pop()
-            return "Lo siento, no he podido obtener una respuesta válida del modelo."
+            return "Sin respuesta válida del modelo."
         except requests.exceptions.RequestException as e:
             print(f"Error contacting LLM: {e}")
             self.history.pop()
-            return "Lo siento, no he podido procesar tu entrada en este momento."
+            return "No se pudo procesar la entrada."
 
     def listen_for_entry(self):
-        self.speak("Estoy escuchando. Habla ahora.")
-        print("Listening... (habla y haz una pausa para terminar)")
-
         last_partial = ""
         stable_count = 0
         STABLE_FRAMES = 10  # 10 × 0.25s = ~2.5s sin cambio → forzar resultado
+        term_width = shutil.get_terminal_size().columns
 
         with sd.RawInputStream(
             samplerate=16000, blocksize=8000, dtype="int16", channels=1
         ) as stream:
+            print(f"{_C_DIM}🎤  escuchando...{_C_RESET}", flush=True)
             while True:
                 data, _ = stream.read(4000)
                 if self.recognizer.AcceptWaveform(bytes(data)):
                     result = json.loads(self.recognizer.Result())
                     if result.get("text"):
-                        print(f"\rReconocido: {result['text']}")
+                        # Limpia línea del partial y muestra entrada final
+                        print(f"\r\033[K{_C_USER}TÚ:{_C_RESET} {result['text']}")
                         return result["text"]
                 else:
                     partial = json.loads(self.recognizer.PartialResult()).get("partial", "")
-                    if partial:
-                        print(f"\r>>> {partial}...", end="", flush=True)
+                    if partial and partial != last_partial:
+                        # Truncar al ancho del terminal para evitar wrap
+                        prefix = "    … "
+                        max_len = term_width - len(prefix) - 1
+                        display = partial[:max_len] + ("…" if len(partial) > max_len else "")
+                        print(f"\r\033[K{_C_DIM}{prefix}{display}{_C_RESET}", end="", flush=True)
                     if partial and partial == last_partial:
                         stable_count += 1
                         if stable_count >= STABLE_FRAMES:
                             final = json.loads(self.recognizer.FinalResult()).get("text", "").strip()
                             print()
                             if final:
-                                print(f"Reconocido: {final}")
+                                print(f"\r\033[K{_C_USER}TÚ:{_C_RESET} {final}")
                                 return final
                             stable_count = 0
                             last_partial = ""
@@ -204,7 +212,7 @@ class JARVYS:
                         stable_count = 0
 
     def start_diary_session(self):
-        self.speak("Hola, soy JARVYS. ¿Qué te gustaría registrar en tu diario hoy?")
+        self.speak("JARVIS en línea. Listo para registrar.")
 
         while True:
             try:
@@ -213,7 +221,7 @@ class JARVYS:
                 if user_entry and (
                     "salir" in user_entry.lower() or "exit" in user_entry.lower()
                 ):
-                    self.speak("Entendido. Finalizando sesión de diario.")
+                    self.speak("Sesión finalizada.")
                     break
 
                 if user_entry:
@@ -222,14 +230,13 @@ class JARVYS:
                     self.speak(response)
 
             except (KeyboardInterrupt, EOFError):
-                self.speak("Finalizando sesión de diario.")
+                self.speak("Sesión finalizada.")
                 break
             except Exception as e:
-                print(f"An unexpected error occurred: {e}")
-                self.speak("Lo siento, ha ocurrido un error inesperado.")
-                break
+                print(f"Error inesperado: {e}")
+                self.speak("Error inesperado. Reintentando.")
 
 
 if __name__ == "__main__":
-    jarvys = JARVYS()
-    jarvys.start_diary_session()
+    jarvis = JARVIS()
+    jarvis.start_diary_session()
