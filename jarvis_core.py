@@ -19,9 +19,11 @@ _MODEL_DIR = Path(__file__).resolve().parent / "model" / "vosk-model-small-es-0.
 class JARVYS:
     def __init__(self):
         self.engine = pyttsx3.init()
+        self._set_spanish_voice()
         self.DIARY_FILE = "jarvys_diary.txt"
         self.API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
         self.OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+        self.history = []
 
         try:
             self.model = vosk.Model(str(_MODEL_DIR))
@@ -30,6 +32,13 @@ class JARVYS:
             print(f"Error loading Vosk model: {e}")
             print(f"Comprueba que el modelo exista en: {_MODEL_DIR}")
             sys.exit(1)
+
+    def _set_spanish_voice(self):
+        voices = self.engine.getProperty("voices")
+        spanish = next((v for v in voices if "es" in v.id and "419" not in v.id), None)
+        if spanish:
+            self.engine.setProperty("voice", spanish.id)
+            print(f"Voz: {spanish.name}")
 
     def speak(self, text):
         """Converts text to speech."""
@@ -94,18 +103,11 @@ Cuando recibas una entrada de un usuario:
             "Authorization": f"Bearer {self.API_KEY}",
         }
 
+        self.history.append({"role": "user", "content": user_entry})
+
         data = {
-            "model": "openrouter/auto",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_entry,
-                }
-            ]
+            "model": "google/gemini-flash-1.5",
+            "messages": [{"role": "system", "content": system_prompt}] + self.history,
         }
 
         try:
@@ -115,27 +117,52 @@ Cuando recibas una entrada de un usuario:
             response.raise_for_status()
             text = self._extract_openrouter_text(response.json())
             if text:
+                self.history.append({"role": "assistant", "content": text})
                 return text
+            self.history.pop()
             return "Lo siento, no he podido obtener una respuesta válida del modelo."
         except requests.exceptions.RequestException as e:
             print(f"Error contacting Open Router API: {e}")
+            self.history.pop()
             return "Lo siento, no he podido procesar tu entrada en este momento."
 
     def listen_for_entry(self):
         """Listens for a diary entry from the user and transcribes it."""
         self.speak("Estoy escuchando. Habla ahora.")
-        print("Listening...")
+        print("Listening... (habla y haz una pausa para terminar)")
+
+        last_partial = ""
+        stable_count = 0
+        # 10 lecturas × 0.25s = ~2.5s sin cambio → forzar resultado final
+        STABLE_FRAMES = 10
 
         with sd.RawInputStream(
             samplerate=16000, blocksize=8000, dtype="int16", channels=1
         ) as stream:
             while True:
-                data = stream.read(4000)[0]
+                data, _ = stream.read(4000)
                 if self.recognizer.AcceptWaveform(bytes(data)):
                     result = json.loads(self.recognizer.Result())
                     if result.get("text"):
-                        print(f"Recognized: {result['text']}")
+                        print(f"\rReconocido: {result['text']}")
                         return result["text"]
+                else:
+                    partial = json.loads(self.recognizer.PartialResult()).get("partial", "")
+                    if partial:
+                        print(f"\r>>> {partial}...", end="", flush=True)
+                    if partial and partial == last_partial:
+                        stable_count += 1
+                        if stable_count >= STABLE_FRAMES:
+                            final = json.loads(self.recognizer.FinalResult()).get("text", "").strip()
+                            print()
+                            if final:
+                                print(f"Reconocido: {final}")
+                                return final
+                            stable_count = 0
+                            last_partial = ""
+                    else:
+                        last_partial = partial
+                        stable_count = 0
 
     def start_diary_session(self):
         """Starts a voice-based diary session."""
